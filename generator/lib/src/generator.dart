@@ -10,6 +10,7 @@ import 'package:built_collection/built_collection.dart';
 import 'package:code_builder/code_builder.dart';
 import 'package:dart_style/dart_style.dart';
 import 'package:dio/dio.dart';
+import 'package:protobuf/protobuf.dart';
 import 'package:retrofit/retrofit.dart' as retrofit;
 import 'package:source_gen/source_gen.dart';
 import 'package:tuple/tuple.dart';
@@ -536,19 +537,48 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
       }
     } else {
       final innerReturnType = _getResponseInnerType(returnType);
+      final bool isProtobuf;
+      if (innerReturnType != null) {
+        isProtobuf = _typeChecker(GeneratedMessage)
+            .isAssignableFromType(innerReturnType);
+      } else {
+        isProtobuf = false;
+      }
+
       if (_typeChecker(List).isExactlyType(returnType) ||
-          _typeChecker(BuiltList).isExactlyType(returnType)) {
-        if (_isBasicType(innerReturnType)) {
-          blocks
-            ..add(
-              declareFinal(_resultVar)
-                  .assign(
-                    refer('await $_dioVar.fetch<List<dynamic>>')
-                        .call([options]),
-                  )
+          _typeChecker(BuiltList).isExactlyType(returnType) ||
+          isProtobuf) {
+        if (_isBasicType(innerReturnType) || isProtobuf) {
+          blocks.add(
+            declareFinal(_resultVar)
+                .assign(
+                  refer('await $_dioVar.fetch<List<dynamic>>').call([options]),
+                )
+                .statement,
+          );
+          if (isProtobuf) {
+            blocks.add(
+              declareFinal(_valueVar)
+                  .assign(refer(_displayString(innerReturnType))
+                      .property('fromBuffer')
+                      .call(
+                    [
+                      refer('$_resultVar.data')
+                          .propertyIf(
+                        thisNullable: returnType.isNullable,
+                        name: 'cast',
+                      )
+                          .call([], {}, [
+                        refer(
+                          'int',
+                        )
+                      ]),
+                    ],
+                  ))
                   .statement,
-            )
-            ..add(
+            );
+          } else {
+            blocks.add(
               declareFinal(_valueVar)
                   .assign(
                     refer('$_resultVar.data')
@@ -567,6 +597,7 @@ class RetrofitGenerator extends GeneratorForAnnotation<retrofit.RestApi> {
                   )
                   .statement,
             );
+          }
         } else {
           blocks.add(
             declareFinal(_resultVar)
@@ -1117,7 +1148,15 @@ You should create a new class to encapsulate the response.
       final sendProgress = args.remove(_onSendProgress);
       final receiveProgress = args.remove(_onReceiveProgress);
 
-      final type = refer(_displayString(_getResponseType(m.returnType)));
+      final returnType = _getResponseType(m.returnType);
+      final Reference type;
+
+      if (returnType != null &&
+          _typeChecker(GeneratedMessage).isAssignableFromType(returnType)) {
+        type = refer("List<int>");
+      } else {
+        type = refer(_displayString(returnType));
+      }
 
       final composeArguments = <String, Expression>{
         _queryParamsVar: queryParams,
@@ -1485,6 +1524,13 @@ if (T != dynamic &&
         if (nullToAbsent) {
           blocks.add(Code('$dataVar.removeWhere((k, v) => v == null);'));
         }
+      } else if (const TypeChecker.fromRuntime(GeneratedMessage)
+          .isAssignableFromType(bodyName.type)) {
+        blocks.add(
+          declareFinal(dataVar)
+              .assign(refer("${bodyName.displayName}.writeToBuffer()"))
+              .statement,
+        );
       } else if (bodyTypeElement != null &&
           ((_typeChecker(List).isExactly(bodyTypeElement) ||
                   _typeChecker(BuiltList).isExactly(bodyTypeElement)) &&
@@ -2012,6 +2058,24 @@ ${bodyName.displayName} == null
 
     final cacheMap = _generateCache(m);
     headers.addAll(cacheMap);
+
+    /// gen code for request Accept for Protobuf
+    final returnType = _getResponseType(m.returnType);
+
+    if (returnType != null &&
+        _typeChecker(GeneratedMessage).isAssignableFromType(returnType)) {
+      headers.addAll({"accept": literal("application/x-protobuf")});
+    }
+
+    /// gen code for request body for content-type on Protobuf body
+    final annotation = _getAnnotation(m, retrofit.Body);
+    final bodyName = annotation?.item1;
+    if (bodyName != null) {
+      if (const TypeChecker.fromRuntime(GeneratedMessage)
+          .isAssignableFromType(bodyName.type)) {
+        headers.addAll({"content-type": literal("application/x-protobuf")});
+      }
+    }
 
     return headers;
   }
